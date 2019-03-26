@@ -16,7 +16,6 @@ let util = require('./util')
 require('./patchFs')
 let soap = require('soap')
 
-
 /**
  *{
    results: [{
@@ -47,42 +46,37 @@ let parseXmlResponse = {
   )
 }
 
+let getResponseFromParsedXml = actionName =>
+  pipe(
+    pathOr({}, 'soap:Envelope.soap:Body.0'.split('.')),
+    values,
+    head,
+    pathOr({}, '0.return.0'.split('.')),
+    actionName in parseXmlResponse
+      ? value => parseXmlResponse[actionName](value)
+      : identity
+  )
 
-let getResponseFromParsedXml = actionName => pipe(
-  pathOr({}, 'soap:Envelope.soap:Body.0'.split('.')),
-  values,
-  head,
-  pathOr({}, '0.return.0'.split('.')),
-  actionName in parseXmlResponse ?
-  value => parseXmlResponse[actionName](value) :
-  identity
-)
-
-parseXmlAsync = actionName => xml => util.nodeBackToPromise(parseXml)(xml).then(getResponseFromParsedXml(actionName))
+parseXmlAsync = actionName => xml =>
+  util
+    .nodeBackToPromise(parseXml)(xml)
+    .then(getResponseFromParsedXml(actionName))
 
 let listIdMap = {
   test: '0bc503ec00000000000000000000001ef8f4'
 }
 
-
 let promiseRequest = util.nodeBackToPromise(request)
 
-
-let standardRequest = ({
-    url,
-    headers,
-    method = 'post',
-    xml,
-    ...config
-  }) =>
+let standardRequest = ({ url, headers, method = 'post', xml, ...config }) =>
   promiseRequest({
     method,
     url,
     headers,
     body: xml
   })
-  .then(parseXmlAsync)
-  .then(getResponseFromParsedXml(config.actionName))
+    .then(parseXmlAsync)
+    .then(getResponseFromParsedXml(config.actionName))
 
 let verifyRecaptcha = config => {
   let response = config['g-recaptcha-response']
@@ -106,29 +100,49 @@ let verifyRecaptcha = config => {
   })
 }
 
+/**
+ * these actions are run after the work to set up the soap client and authenticate
+ * and verify the recaptcha are successful. you can indicate whether to test for recaptcha
+ * by passing captchaRequired (can be seen in src/domains/storefront/saveContact) external
+ * should also be true for any request that is coming from an external source.
+ * the response to calling an action should be converted to an object that represents
+ * the xml that is why below you will see 0.return.results etc because that is the xml structure.
+ * All that should be needed to use the bronto client is to add an action that calls
+ * the appropriate bronto soap method and grab the result from the response.
+ */
+
 let actions = {
-  saveContact: config => (
-    config.client.addOrUpdateContactsAsync({
-      contacts: [{
-        email: config.email,
-        listIds: [config.listId]
-      }]
-    }).then(pipe(
-      pathOr({
-        isError: false,
-        isNew: true
-      }, '0.return.results.0'.split('.')),
-      evolve({
-        id: empty
+  saveContact: config =>
+    config.client
+      .addOrUpdateContactsAsync({
+        contacts: [
+          {
+            email: config.email,
+            listIds: [config.listId]
+          }
+        ]
       })
-    ))
-  ),
-  readLists: config => (
-    config.client.readListsAsync({
-      pageNumber: 1,
-      filter: ''
-    }).then(util.print)
-  )
+      .then(
+        pipe(
+          pathOr(
+            {
+              isError: false,
+              isNew: true
+            },
+            '0.return.results.0'.split('.')
+          ),
+          evolve({
+            id: empty
+          })
+        )
+      ),
+  readLists: config =>
+    config.client
+      .readListsAsync({
+        pageNumber: 1,
+        filter: ''
+      })
+      .then(util.print)
 }
 
 module.exports = mapObjIndexed(
@@ -163,22 +177,20 @@ module.exports = mapObjIndexed(
         message: 'key missing in body'
       })
 
-
     let client
 
-    return (
-        config.captchaRequired && config.external ?
-        (
-          config['g-recaptcha-response'] ?
-          verifyRecaptcha(merge(config, {
-            recaptchaSecret
-          })) :
-          Promise.reject({
+    return (config.captchaRequired && config.external
+      ? config['g-recaptcha-response']
+        ? verifyRecaptcha(
+            merge(config, {
+              recaptchaSecret
+            })
+          )
+        : Promise.reject({
             message: 'captcha response missing'
           })
-        ) :
-        Promise.resolve()
-      )
+      : Promise.resolve()
+    )
       .then(() => {
         return soap.createClientAsync(url + '?wsdl', {
           envelopeKey: 'SOAP_ENV'
@@ -188,9 +200,11 @@ module.exports = mapObjIndexed(
       .then(reference => {
         client = reference.client
         util.print(Object.keys(client))
-        return util.nodeBackToPromise(reference.client.login).call(reference.client, {
-          apiToken: token
-        })
+        return util
+          .nodeBackToPromise(reference.client.login)
+          .call(reference.client, {
+            apiToken: token
+          })
       })
       .then(parseXmlAsync())
       .then(putItHere('sessionId'))
