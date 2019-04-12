@@ -1,15 +1,21 @@
 let actions = require('../../actions-soap')
-let pick = require('ramda/src/pick')
-let merge = require('ramda/src/merge')
+let mergeRight = require('ramda/src/mergeRight')
 
 module.exports = function(context, callback) {
-  let config = merge(pick(['key'], context.request.body || {}), {
-    external: true,
-    keyRequired: true
-  })
+  let body = context.request.body
+  body.listId = '0bc503ec00000000000000000000001ef8f4'
+  body.name = 'wishlistEmail'
+  body.subject = 'Check out these great products!'
+  body.email = body.recipient
+  let config = mergeRight(
+    { body },
+    {
+      external: true
+    }
+  )
 
   actions
-    .saveContact(context, config)
+    .sendMessage(context, config)
     .then((res = { message: 'success' }) => {
       if (res && res.isError) return Promise.reject(res)
       console.log('res', res)

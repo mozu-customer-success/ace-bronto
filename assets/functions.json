@@ -9,6 +9,11 @@
       "id": "saveContact",
       "virtualPath": "./dist/storefront.manifest.all.js",
       "actionId": "http.storefront.routes"
+    },
+    {
+      "id": "sendMessage",
+      "virtualPath": "./dist/storefront.manifest.all.js",
+      "actionId": "http.storefront.routes"
     }
   ]
 }

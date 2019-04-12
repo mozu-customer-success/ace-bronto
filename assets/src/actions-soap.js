@@ -1,82 +1,80 @@
 let mapObjIndexed = require('ramda/src/mapObjIndexed')
 let pipe = require('ramda/src/pipe')
+let compose = require('ramda/src/compose')
 let merge = require('ramda/src/merge')
+let mergeRight = require('ramda/src/mergeRight')
+let mergeAll = require('ramda/src/mergeAll')
 let pathOr = require('ramda/src/pathOr')
-let path = require('ramda/src/path')
-let values = require('ramda/src/values')
+let lensPath = require('ramda/src/lensPath')
+let pick = require('ramda/src/pick')
+let curry = require('ramda/src/curry')
 let head = require('ramda/src/head')
 let evolve = require('ramda/src/evolve')
-let prop = require('ramda/src/prop')
-let empty = require('ramda/src/empty')
 let identity = require('ramda/src/identity')
-let omit = require('ramda/src/omit')
-let request = require('request')
+let view = require('ramda/src/view')
+let empty = require('ramda/src/empty')
+let assoc = require('ramda/src/assoc')
 let parseXml = require('xml2js').parseString
 let util = require('./util')
+let needle = require('needle')
 require('./patchFs')
 let soap = require('soap')
+let cacheManger = require('./cacheManager')
 
-/**
- *{
-   results: [{
-     id: ['093ff30b-2a6f-4495-b724-5a3da0c4a9f7'],
-     isNew: ['true'],
-     isError: ['false'],
-     errorCode: ['0']
-   }]
- }
- */
+let { type, nodeBackToPromise, log } = util
 
-let parseXmlResponse = {
-  saveContact: pipe(
-    prop('results'),
-    head,
-    evolve({
-      isNew: pipe(
-        head,
-        x => x === 'true'
-      ),
-      isError: pipe(
-        head,
-        x => x === 'true'
-      ),
-      errorString: head,
-      id: empty
-    })
-  )
+let regex = {
+  result: /<return>.*<\/return>/
 }
-
-let getResponseFromParsedXml = actionName =>
-  pipe(
-    pathOr({}, 'soap:Envelope.soap:Body.0'.split('.')),
-    values,
-    head,
-    pathOr({}, '0.return.0'.split('.')),
-    actionName in parseXmlResponse
-      ? value => parseXmlResponse[actionName](value)
-      : identity
-  )
-
-parseXmlAsync = actionName => xml =>
-  util
-    .nodeBackToPromise(parseXml)(xml)
-    .then(getResponseFromParsedXml(actionName))
 
 let listIdMap = {
   test: '0bc503ec00000000000000000000001ef8f4'
 }
 
-let promiseRequest = util.nodeBackToPromise(request)
+let parseXmlAsync = util.nodeBackToPromise(parseXml)
 
-let standardRequest = ({ url, headers, method = 'post', xml, ...config }) =>
-  promiseRequest({
-    method,
-    url,
-    headers,
-    body: xml
-  })
-    .then(parseXmlAsync)
-    .then(getResponseFromParsedXml(config.actionName))
+let parseXmlResponse = xmlResponse => {
+  return parseXmlAsync(head(xmlResponse.match(regex.result) || []) || '').then(
+    parsed => {
+      return lens(null, 'return', parsed) || Promise.reject('invalid xml')
+    }
+  )
+}
+
+let lens = curry((def, properties, obj) => {
+  return util.log(
+    view(
+      lensPath(
+        'string' === typeof properties ? properties.split('.') : properties
+      ),
+      obj
+    ) || def
+  )
+})
+
+let defaultLens = lens({ isError: true })
+let lenses = {
+  defaultReturn: defaultLens('0.return.results.0')
+}
+
+const defaults = {
+  messageName: 'example',
+  messageSubject: 'greetings',
+  messageContent: 'hi mom',
+  messageType: 'transactional',
+  messageFromEmail: 'kevin.brown@kibocommerce.com',
+  messageFromName: 'Kevin Brown'
+}
+
+let limitExposure = curry((config, response) => {
+  if (!config.external) return response
+  return evolve(
+    {
+      id: empty
+    },
+    response
+  )
+})
 
 let verifyRecaptcha = config => {
   let response = config['g-recaptcha-response']
@@ -89,11 +87,12 @@ let verifyRecaptcha = config => {
     return Promise.reject({
       message: 'No recaptcha secret'
     })
-  return promiseRequest({
-    method: 'post',
-    url: `https://www.google.com/recaptcha/api/siteverify?response=${response}&secret=${secret}`,
-    json: true
-  }).then(verifyResponse => {
+  return needle(
+    'post',
+    `https://www.google.com/recaptcha/api/siteverify?response=${response}&secret=${secret}`,
+    {},
+    { json: true }
+  ).then(verifyResponse => {
     console.log('recaptcha response', verifyResponse)
     if (!verifyResponse.success) return Promise.reject(verifyResponse)
     return config
@@ -112,62 +111,155 @@ let verifyRecaptcha = config => {
  */
 
 let actions = {
-  saveContact: config =>
-    config.client
+  saveContact: config => {
+    return config.client
       .addOrUpdateContactsAsync({
         contacts: [
           {
-            email: config.email,
-            listIds: [config.listId]
+            email: config.body.email,
+            listIds: [config.body.listId],
+            type: 'transactional'
           }
         ]
       })
       .then(
         pipe(
-          pathOr(
-            {
-              isError: false,
-              isNew: true
-            },
-            '0.return.results.0'.split('.')
-          ),
-          evolve({
-            id: empty
-          })
+          lenses.defaultReturn,
+          limitExposure(config)
         )
-      ),
-  readLists: config =>
+      )
+  },
+  readLists: config => {
     config.client
       .readListsAsync({
         pageNumber: 1,
         filter: ''
       })
-      .then(util.print)
+      .then(lenses.defaultReturn)
+  },
+  updateMessages: config => {
+    let id = config.brontoMessage && config.brontoMessage.id
+    return config.client
+      .updateMessagesAsync({
+        messages: [
+          {
+            id,
+            name: config.body.name || defaults.messageName,
+            content: {
+              type: 'html',
+              subject: config.body.subject || defaults.messageSubject,
+              content: config.body.message || defaults.messageContent
+            }
+          }
+        ]
+      })
+      .then(lenses.defaultReturn)
+      .then(limitExposure(config))
+  },
+  addOrUpdateMessages: config => {
+    let putItHere = util.promiseConfig(config)
+    return config.client
+      .addMessagesAsync({
+        messages: config.body.messages || [
+          {
+            name: config.body.name || defaults.messageName,
+            content: {
+              type: 'html',
+              subject: config.body.subject || defaults.messageSubject,
+              content: config.body.message || defaults.messageContent
+            }
+          }
+        ]
+      })
+      .then(lenses.defaultReturn)
+      .then(response => {
+        if (response.isError && response.errorCode === 615) {
+          return actions
+            .readMessages(assoc('external', false, config))
+            .then(putItHere('brontoMessage'))
+            .then(actions.updateMessages.bind(actions, config))
+        }
+        return putItHere('brontoMessage', response)
+      })
+      .then(limitExposure(config))
+  },
+  readMessages: config => {
+    if (config.brontoMessage) return config.brontoMessage
+    return config.client
+      .readMessagesAsync(
+        log({
+          pageNumber: config.body.pageNumber || 1,
+          pageSize: config.body.pageSize || 10,
+          includeContent: config.body.includeContent || false,
+          filter: type.isObject(config.body.filter)
+            ? config.body.filter
+            : {
+                name: {
+                  operator: 'EqualTo',
+                  value: config.body.name || defaults.messageName
+                }
+              }
+        })
+      )
+      .then(defaultLens('0.return.0'))
+      .then(limitExposure(config))
+  },
+  sendMessage: config => {
+    let putItHere = util.promiseConfig(config)
+    return actions
+      .saveContact(config)
+      .then(putItHere('brontoContact'))
+      .then(actions.addOrUpdateMessages.bind(actions, config))
+      .then(actions.readMessages.bind(actions, config))
+      .then(putItHere('brontoMessage'))
+      .then(config => {
+        return config.client.addDeliveriesAsync({
+          deliveries: [
+            mergeAll([
+              pick(['fromEmail', 'fromName', 'replyEmail'], config),
+              {
+                messageId: config.brontoMessage.id,
+                type: defaults.messageType,
+                fromEmail: defaults.messageFromEmail,
+                replyEmail: defaults.messageFromEmail,
+                fromName: defaults.messageFromName,
+                recipients: [
+                  {
+                    id: config.brontoContact.id,
+                    type: 'contact'
+                  }
+                ]
+              }
+            ])
+          ]
+        })
+      })
+      .then(lenses.defaultReturn)
+      .then(limitExposure(config))
+  }
 }
 
 module.exports = mapObjIndexed(
   (action, actionName) => (context, config = {}) => {
-    let url = path('configuration.url'.split('.'), context)
-    let token = path('configuration.token'.split('.'), context)
-    let listId = path('configuration.listId'.split('.'), context)
-    let key = path('configuration.key'.split('.'), context)
-    let recaptchaSecret = path(
-      'configuration.recaptchaSecret'.split('.'),
-      context
+    // let url = path('configuration.url'.split('.'), context)
+    // let token = path('configuration.token'.split('.'), context)
+    // let listId = path('configuration.listId'.split('.'), context)
+    // let key = path('configuration.key'.split('.'), context)
+    // let recaptchaSecret = path(
+    //   'configuration.recaptchaSecret'.split('.'),
+    //   context
+    // )
+    util.log(actionName)
+    let putItHere = util.promiseConfig(
+      mergeAll([context.configuration, config, { actionName }])
     )
-    let putItHere = util.promiseConfig({
-      url,
-      token,
-      listId,
-      recaptchaSecret,
-      actionName
-    })
+    config = putItHere.value
 
-    if (!url)
+    if (!config.url)
       return Promise.reject({
         message: 'url missing in config'
       })
-    if (!token)
+    if (!config.token)
       return Promise.reject({
         message: 'token missing in config'
       })
@@ -177,61 +269,89 @@ module.exports = mapObjIndexed(
         message: 'key missing in body'
       })
 
-    let client
-
-    return (config.captchaRequired && config.external
-      ? config['g-recaptcha-response']
-        ? verifyRecaptcha(
-            merge(config, {
-              recaptchaSecret
+    return (
+      (config.captchaRequired && config.external
+        ? config['g-recaptcha-response']
+          ? verifyRecaptcha(
+              merge(config, {
+                recaptchaSecret
+              })
+            )
+          : Promise.reject({
+              message: 'captcha response missing'
             })
-          )
-        : Promise.reject({
-            message: 'captcha response missing'
+        : Promise.resolve()
+      )
+        .then(() => {
+          // return soap.createClientAsync(url + '?wsdl', {
+          return soap.createClientAsync('./bronto-soap-definition', {
+            envelopeKey: 'SOAP_ENV'
           })
-      : Promise.resolve()
-    )
-      .then(() => {
-        return soap.createClientAsync(url + '?wsdl', {
-          envelopeKey: 'SOAP_ENV'
         })
-      })
-      .then(putItHere('client'))
-      .then(reference => {
-        client = reference.client
-        util.print(Object.keys(client))
-        return util
-          .nodeBackToPromise(reference.client.login)
-          .call(reference.client, {
-            apiToken: token
-          })
-      })
-      .then(parseXmlAsync())
-      .then(putItHere('sessionId'))
-      .then(reference => {
-        reference.client.addSoapHeader({
-          'tns:sessionHeader': {
-            sessionId: reference.sessionId
+        .then(putItHere('client'))
+        .then(reference => {
+          // for (let key in reference.client) {
+          //   if (type.isFunction(reference.client[key])) {
+          //     let method = reference.client[key]
+          //     reference.client[key] = (...args) => {
+          //       console.log(args)
+          //       return method.apply(reference.client, args)
+          //     }
+          //   }
+          // }
+          // client = reference.client
+          if (reference.sessionId) return reference
+          // The session will end if there is no transaction for 20 minutes.
+          return util
+            .getFromCache(
+              context,
+              'brontoSessionId4',
+              {},
+              20,
+              true,
+              function() {
+                log('refreshing session')
+                return util
+                  .nodeBackToPromise(reference.client.login)
+                  .call(reference.client, {
+                    apiToken: reference.token
+                  })
+                  .then(parseXmlResponse)
+              }
+            )
+            .then(putItHere('sessionId'))
+            .then(reference => {
+              console.log('sessionId', reference.sessionId)
+
+              reference.client.addSoapHeader({
+                'tns:sessionHeader': {
+                  sessionId: reference.sessionId
+                }
+              })
+              return reference
+            })
+        })
+        // .then(putItHere(null))
+        // .then(reference => {
+        //   return actions.readLists(merge(config, reference))
+        // })
+        .then(action.bind(actions, config))
+        .then(reference => {
+          if (reference.client) {
+            util.print(reference.client.lastRequest)
+            util.print(reference.client.lastRequestHeaders)
           }
+          return reference.result
         })
-      })
-      .then(putItHere(null))
-      .then(reference => {
-        return actions.readLists(merge(config, reference))
-      })
-      .then(putItHere(null))
-      .then(reference => action(merge(config, reference)))
-      .then(putItHere('result'))
-      .then(reference => {
-        util.print(reference.client.lastRequest)
-        util.print(reference.client.lastRequestHeaders)
-        return reference.result
-      })
-      .catch(err => {
-        util.print(client.lastRequest)
-        util.print(client.lastRequestHeaders)
-        return Promise.reject(err)
-      })
+        .catch(err => {
+          util.print('err', err)
+          if (config.client) {
+            util.print(config.client.lastRequest)
+            util.print(config.client.lastRequestHeaders)
+          }
+          return Promise.reject(err)
+        })
+    )
   },
   actions
 )

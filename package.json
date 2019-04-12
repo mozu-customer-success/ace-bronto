@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "ace bronto integration",
   "scripts": {
-    "test": "grunt test"
+    "debug": "node --nolazy --inspect-brk=9229 ./test.js"
   },
   "devDependencies": {
     "grunt": "^1.0.3",
@@ -17,9 +17,8 @@
     "time-grunt": "^1.4.0"
   },
   "dependencies": {
-    "circular-json": "^0.5.5",
+    "needle": "^2.2.4",
     "ramda": "^0.25.0",
-    "request": "^2.88.0",
     "xml2js": "^0.4.19"
   }
 }
